@@ -1,0 +1,28 @@
+{
+  "name": "slack-claude-bot",
+  "version": "1.0.0",
+  "description": "Slack bot that delegates mentions to the local Claude Code CLI — code reviews and technical assistance via Slack.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "setup": "./setup.sh",
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "autostart": "./install-autostart.sh"
+  },
+  "keywords": [
+    "slack",
+    "claude",
+    "claude-code",
+    "bot",
+    "code-review"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@slack/bolt": "^4.6.0",
+    "dotenv": "^17.3.1"
+  }
+}

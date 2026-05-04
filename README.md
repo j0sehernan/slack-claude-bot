@@ -1,0 +1,236 @@
+# Slack Claude Bot
+
+A Slack bot that listens for mentions on your app and delegates to the **Claude Code instance running on your local machine** to do the work — code reviews, debugging, anything you can do in Claude Code. The reply is posted back to the same Slack thread.
+
+Ideal setup: `git clone` → `./setup.sh` → paste 2 tokens → `./install-autostart.sh` and it runs forever in the background.
+
+---
+
+## 📋 Prerequisites (1 minute)
+
+Before touching this repo, make sure you have:
+
+| Tool | Check | If missing |
+|---|---|---|
+| **Node ≥ 18** | `node -v` | `brew install node` |
+| **Claude Code CLI authenticated** | `claude --version` and have launched Claude at least once | https://docs.claude.com/claude-code/quickstart |
+| **`gh` CLI authenticated** | `gh auth status` (should say "Logged in") | `brew install gh && gh auth login` |
+| **A Slack workspace** where you can install apps | — | Ask your admin |
+
+> **No** ngrok, public domain, or open port required. The bot uses Socket Mode.
+
+---
+
+## ⚡ Quick start (3 minutes)
+
+```bash
+git clone <this-repo-url>
+cd slack-claude-bot
+./setup.sh
+```
+
+`setup.sh` handles everything that can be automated:
+
+- ✅ Verifies Node 18+, the `claude` CLI, and the `gh` CLI
+- ✅ Installs npm dependencies
+- ✅ Creates `.env` from the template
+- ✅ Installs the `/pr-review` skill into `~/.claude/skills/pr-review/` (only if you don't already have one)
+
+The only **manual** step is creating the Slack app in their web UI and pasting 2 tokens into `.env`. See the next section.
+
+---
+
+## 🤖 Are you asking Claude Code to set this up for you?
+
+If you are running `claude` on your machine and tell it *"set this bot up for me"*, this is the exact protocol Claude should follow. Most of it is automatable; only two steps require you (a human) to act in a browser.
+
+**What Claude can do on its own (automatable):**
+1. `git clone` and `cd` into the repo
+2. Run `./setup.sh` (installs deps + skill)
+3. Open the browser for you with `open https://api.slack.com/apps` (or the Linux equivalent)
+4. Edit `.env` with the tokens you paste back
+5. Start the bot (`npm start`) or install it as a service (`./install-autostart.sh`)
+6. Run the smoke test at the end
+
+**What you (human) have to do — Claude must pause and ask:**
+
+> 🛑 **PAUSE #1 — Create the Slack app:**
+> 1. In the tab Claude opened, click **"Create New App"** → **"From a manifest"**
+> 2. Pick your workspace
+> 3. **Switch to the YAML tab** (it defaults to JSON) and paste the contents of `manifest.yaml` that Claude will show you (it reads it from the repo)
+> 4. Click **"Next"** → **"Create"**
+> 5. **OAuth & Permissions** → **"Install to Workspace"** → authorize
+> 6. Copy the **Bot User OAuth Token** (`xoxb-…`) and hand it to Claude
+>
+> 🛑 **PAUSE #2 — App-Level Token:**
+> 1. **Basic Information** → scroll to **"App-Level Tokens"** → **"Generate Token and Scopes"**
+> 2. Any name. Scope: `connections:write`. Click **"Generate"**.
+> 3. Copy the token (`xapp-…`) and hand it to Claude
+>
+> 🛑 **PAUSE #3 — Invite the bot to a channel:**
+> In Slack, in the channel where you want to use it: `/invite @claude-code`
+
+With those 2 tokens and the `/invite`, Claude finishes the rest on its own.
+
+**Final smoke test** (Claude can run it to confirm everything is wired up):
+
+```bash
+# 1. The bot starts cleanly and prints the "listening" banner
+timeout 6 npm start || true
+
+# 2. Skill installed
+test -f ~/.claude/skills/pr-review/SKILL.md && echo "✅ skill OK"
+
+# 3. .env contains valid-looking tokens
+grep -q '^SLACK_BOT_TOKEN=xoxb-' .env && grep -q '^SLACK_APP_TOKEN=xapp-' .env && echo "✅ tokens OK"
+```
+
+If all three print "✅", only the real test remains: in the channel where you invited the bot, post:
+
+```
+@claude-code https://github.com/<some-org>/<some-repo>/pull/<number>
+```
+
+The bot replies with `:hourglass_flowing_sand: Working on it…` and then with the review in the thread.
+
+---
+
+## 🛠️ Create the Slack app (one-time)
+
+1. Go to [https://api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest**.
+2. Pick your workspace.
+3. **Switch to the YAML tab** (it defaults to JSON) and paste the full contents of [`manifest.yaml`](./manifest.yaml). Click **Next** → **Create**.
+4. In the new app:
+   - **OAuth & Permissions** → **Install to Workspace** → authorize → copy the **Bot User OAuth Token** (`xoxb-…`).
+   - **Basic Information** → scroll to **App-Level Tokens** → **Generate Token and Scopes** → any name, scope `connections:write` → click **Generate** → copy the token (`xapp-…`).
+5. Edit `.env`:
+   ```bash
+   SLACK_BOT_TOKEN=xoxb-...
+   SLACK_APP_TOKEN=xapp-...
+   ```
+6. Invite the bot to the channel where you want to use it: `/invite @claude-code`.
+
+> The manifest already enables **Socket Mode**, so you do **not** need a public URL, ngrok, or anything similar.
+
+---
+
+## ▶️ Start the bot
+
+```bash
+npm start
+```
+
+To make it auto-start with your session and keep listening forever (LaunchAgent on macOS, systemd on Linux):
+
+```bash
+./install-autostart.sh
+```
+
+Logs:
+
+- macOS: `tail -f logs/bot.log`
+- Linux: `journalctl --user -u slack-claude-bot -f`
+
+---
+
+## 💬 How to use it from Slack
+
+Mention the bot with a PR:
+
+```
+@claude-code https://github.com/org/repo/pull/123
+```
+
+By default the bot prepends `/pr-review` (configurable in `.env` via `DEFAULT_SKILL`), so the line above translates internally to:
+
+```
+/pr-review https://github.com/org/repo/pull/123
+```
+
+Your local Claude Code receives that prompt, runs the skill, and posts the review in the thread.
+
+**Continue the conversation**: once the bot has replied in a thread, you can keep replying in that thread **without re-mentioning the bot** — the bot keeps a per-thread session (`sessions.json`) so Claude remembers what you discussed.
+
+**Other skills**: if your message starts with `/`, the bot honors it as-is:
+
+```
+@claude-code /security-review https://github.com/org/repo/pull/456
+@claude-code /explain this snippet ...
+```
+
+**No skill (pass-through)**: set `DEFAULT_SKILL=` (empty) in `.env` and the bot will pass the raw text to Claude.
+
+---
+
+## 🔧 Configuration (`.env`)
+
+| Variable           | Default        | Purpose                                                                 |
+| ------------------ | -------------- | ----------------------------------------------------------------------- |
+| `SLACK_BOT_TOKEN`  | —              | **Required.** Bot token (`xoxb-…`).                                      |
+| `SLACK_APP_TOKEN`  | —              | **Required.** App-level token (`xapp-…`) with `connections:write` scope. |
+| `DEFAULT_SKILL`    | `pr-review`    | Skill auto-prepended to mentions. Empty = pass-through.                  |
+| `WORKING_DIR`      | bot repo dir   | Directory where `claude` runs. Point it at another repo if you like.     |
+| `ALLOWED_CHANNELS` | (all)          | CSV of allowed channel IDs (`C0123…`). Empty = all channels.             |
+| `ALLOWED_USERS`    | (all)          | CSV of allowed user IDs. Useful to limit who can invoke the bot.         |
+| `CLAUDE_TIMEOUT_MS`| `600000`       | Hard timeout per claude run (10 minutes default).                        |
+| `DEBUG`            | `0`            | `1` to dump claude stderr into the logs.                                 |
+
+---
+
+## 🧠 The `/pr-review` skill
+
+`./setup.sh` installs a pre-built skill at `~/.claude/skills/pr-review/SKILL.md` that:
+
+- Uses `gh pr view` and `gh pr diff` to fetch the PR
+- Analyzes security, bugs, performance, architecture, backwards-compat, tests
+- Returns a structured report with `file:line` citations and a verdict
+
+**Already have your own `/pr-review`?** The setup **does not overwrite it**. If you want to use the version bundled here, delete `~/.claude/skills/pr-review/` and re-run `./setup.sh`.
+
+**Want to use a different skill?** Set `DEFAULT_SKILL=your-skill` in `.env` and restart the bot. Just make sure the skill exists at `~/.claude/skills/<name>/SKILL.md`.
+
+---
+
+## 🔒 Security
+
+- `.env`, `sessions.json`, and `logs/` are in `.gitignore` — never committed.
+- The bot runs `claude --dangerously-skip-permissions` to avoid interactive prompts. **That means claude has full permissions on your machine** within `WORKING_DIR`. Treat it like your interactive Claude Code session.
+- To limit who can invoke it, use `ALLOWED_CHANNELS` and/or `ALLOWED_USERS`.
+- The bot does NOT post comments back to GitHub unless you explicitly ask it to.
+
+---
+
+## 🗂️ Layout
+
+```
+slack-claude-bot/
+├── index.js                # Bot (Slack Bolt + spawn claude)
+├── manifest.yaml           # Slack app manifest (importable)
+├── setup.sh                # Automated setup
+├── install-autostart.sh    # LaunchAgent / systemd installer
+├── .env.example            # Configuration template
+├── package.json
+└── skills/
+    └── pr-review/
+        └── SKILL.md        # Pre-built code-review skill
+```
+
+---
+
+## 🩹 Troubleshooting
+
+**The bot starts but doesn't reply**
+- Make sure you invited the bot to the channel (`/invite @claude-code`).
+- Check the logs: if you see the `Slack Claude Bot — listening` banner, the Socket Mode connection is healthy.
+
+**`Failed to spawn claude`**
+- The bot looks for `claude` in `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`. If yours lives elsewhere, set `CLAUDE_BIN=/absolute/path/to/claude` in `.env`.
+
+**Slack auth errors at startup**
+- Verify `SLACK_BOT_TOKEN` starts with `xoxb-` and `SLACK_APP_TOKEN` starts with `xapp-`. If you swapped them, the bot fails with a clear message at boot.
+
+**`gh: command not found` during a review**
+- The `/pr-review` skill needs `gh`. Install with `brew install gh && gh auth login`.
+
+**Review comes back empty or with `(claude returned no output)`**
+- Set `DEBUG=1` in `.env` and restart. Claude's stderr will be printed to the logs and usually reveals the cause (skill not found, timeout, etc.).
