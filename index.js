@@ -195,13 +195,14 @@ function splitMessage(text, limit = 3900) {
   return parts;
 }
 
-// Extract the first GitHub PR URL from the message text. Slack wraps URLs in
+// Extract every GitHub PR URL found in the message text. Slack wraps URLs in
 // `<...>` (and may add a `|label` suffix), so we ignore those characters when
-// matching. Returns null if no PR URL is present.
-function extractPrUrl(rawText) {
+// matching. Duplicates are removed while preserving order. Returns [] if no
+// PR URL is present.
+function extractPrUrls(rawText) {
   const stripped = rawText.replace(/<@[A-Z0-9]+>/g, '');
-  const m = stripped.match(/https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/);
-  return m ? m[0] : null;
+  const matches = stripped.match(/https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/g) || [];
+  return [...new Set(matches)];
 }
 
 function isAuthorized(event) {
@@ -324,16 +325,19 @@ app.event('app_mention', async ({ event, say, client }) => {
     return;
   }
   const threadTs = event.thread_ts || event.ts;
-  const url = extractPrUrl(event.text || '');
-  if (!url) {
+  const urls = extractPrUrls(event.text || '');
+  if (urls.length === 0) {
     await say({
-      text: 'I only review GitHub pull requests. Mention me with a PR URL, e.g.\n`@me https://github.com/org/repo/pull/123`',
+      text: 'I only review GitHub pull requests. Mention me with one or more PR URLs, e.g.\n`@me https://github.com/org/repo/pull/123 https://github.com/org/repo/pull/124`',
       thread_ts: threadTs,
     });
     return;
   }
   const skill = DEFAULT_SKILL || 'pr-review';
-  const prompt = `/${skill} ${url}`;
+  const prompt = urls.length === 1
+    ? `/${skill} ${urls[0]}`
+    : `/${skill}\n${urls.join('\n')}`;
+  console.log(`[mention] channel=${event.channel} thread=${threadTs} urls=${urls.length}`);
   await handlePrompt({ prompt, threadTs, say, client, channel: event.channel });
 });
 

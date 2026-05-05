@@ -9,10 +9,18 @@ You are reviewing a GitHub pull request and producing a **concise**, **actionabl
 
 ## Inputs
 
-The user message (passed as `$ARGUMENTS`) usually contains:
-- A GitHub PR URL — e.g. `https://github.com/org/repo/pull/123`
-- Or a shorthand like `org/repo#123`
-- Optional extra instructions ("focus on security", "check the migration", etc.)
+The user message (passed as `$ARGUMENTS`) contains one or more GitHub PR URLs.
+When called from the Slack bot, multiple URLs are passed one per line:
+
+```
+https://github.com/org/repo/pull/123
+https://github.com/org/repo/pull/124
+```
+
+If a single PR is given, run the review and produce one report.
+If several are given, review them **sequentially in the order received** and
+emit one full report per PR, separated by a `---` divider in the output. Do
+not try to compare or merge findings across PRs.
 
 If you cannot find a PR reference in the input, ask the user to provide one.
 
