@@ -91,11 +91,15 @@ function saveSessions() {
 // Claude runner
 // ---------------------------------------------------------------------------
 
-function runClaude(prompt, sessionId) {
+// Stream Claude output as NDJSON events. Calls `onProgress` with
+// {kind: 'tool', name} or {kind: 'writing'} as work progresses, and resolves
+// with the final result + session id when claude exits.
+function runClaude(prompt, sessionId, onProgress) {
   return new Promise((resolve, reject) => {
     const args = [
       '--print',
-      '--output-format', 'json',
+      '--output-format', 'stream-json',
+      '--verbose',
       '--dangerously-skip-permissions',
     ];
 
@@ -114,10 +118,43 @@ function runClaude(prompt, sessionId) {
       timeout: CLAUDE_TIMEOUT_MS,
     });
 
-    let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    let buffer = '';
+    let finalResult = '';
+    let finalSessionId = sessionId;
+    let accumulatedText = '';
+
     proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    proc.stdout.on('data', (d) => {
+      buffer += d.toString();
+      let nl;
+      while ((nl = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        let event;
+        try { event = JSON.parse(line); } catch { continue; }
+
+        if (DEBUG) console.error(`[claude:event] ${event.type}${event.subtype ? '/' + event.subtype : ''}`);
+
+        if (event.type === 'system' && event.session_id) {
+          finalSessionId = event.session_id;
+        } else if (event.type === 'assistant' && event.message?.content) {
+          for (const block of event.message.content) {
+            if (block.type === 'tool_use' && block.name) {
+              onProgress?.({ kind: 'tool', name: block.name, input: block.input });
+            } else if (block.type === 'text' && block.text?.trim()) {
+              accumulatedText += block.text;
+              onProgress?.({ kind: 'writing' });
+            }
+          }
+        } else if (event.type === 'result') {
+          finalResult = (event.result || '').toString();
+          finalSessionId = event.session_id || finalSessionId;
+        }
+      }
+    });
 
     proc.on('error', (err) => {
       reject(new Error(`Failed to spawn claude (${CLAUDE_BIN}): ${err.message}`));
@@ -130,24 +167,12 @@ function runClaude(prompt, sessionId) {
         return reject(new Error(`Claude run timed out after ${CLAUDE_TIMEOUT_MS / 1000}s`));
       }
       if (code !== 0) {
-        const tail = (stderr || stdout).trim().split('\n').slice(-10).join('\n');
+        const tail = (stderr || buffer).trim().split('\n').slice(-10).join('\n');
         return reject(new Error(`claude exited with code ${code}\n${tail}`));
       }
 
-      // Parse JSON output for reliable session id + result extraction.
-      let result = stdout.trim();
-      let newSessionId = sessionId;
-      try {
-        const parsed = JSON.parse(stdout);
-        result = (parsed.result || parsed.message || '').toString().trim() || stdout.trim();
-        newSessionId = parsed.session_id || parsed.sessionId || sessionId;
-      } catch {
-        // Fallback: legacy stderr scan
-        const m = stderr.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
-        if (m) newSessionId = m[1];
-      }
-
-      resolve({ output: result, sessionId: newSessionId });
+      const output = (finalResult || accumulatedText).trim();
+      resolve({ output, sessionId: finalSessionId });
     });
   });
 }
@@ -170,12 +195,13 @@ function splitMessage(text, limit = 3900) {
   return parts;
 }
 
-function buildPrompt(rawText) {
-  const text = rawText.replace(/<@[A-Z0-9]+>/g, '').trim();
-  if (!text) return '';
-  if (!DEFAULT_SKILL) return text;
-  if (text.startsWith('/')) return text; // user explicitly invoked a slash command / skill
-  return `/${DEFAULT_SKILL} ${text}`;
+// Extract the first GitHub PR URL from the message text. Slack wraps URLs in
+// `<...>` (and may add a `|label` suffix), so we ignore those characters when
+// matching. Returns null if no PR URL is present.
+function extractPrUrl(rawText) {
+  const stripped = rawText.replace(/<@[A-Z0-9]+>/g, '');
+  const m = stripped.match(/https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/);
+  return m ? m[0] : null;
 }
 
 function isAuthorized(event) {
@@ -194,44 +220,124 @@ const app = new App({
   socketMode: true,
 });
 
-async function handlePrompt({ prompt, threadTs, say, channel }) {
-  await say({ text: ':hourglass_flowing_sand: Working on it…', thread_ts: threadTs });
+// Friendly status text per tool name. Falls back to the raw tool name.
+function statusForTool(name) {
+  const map = {
+    Bash: ':gear: Running shell command…',
+    Read: ':open_book: Reading file…',
+    Edit: ':pencil2: Editing file…',
+    Write: ':pencil2: Writing file…',
+    Grep: ':mag: Searching…',
+    Glob: ':mag: Searching files…',
+    WebFetch: ':globe_with_meridians: Fetching URL…',
+    WebSearch: ':globe_with_meridians: Searching the web…',
+    Task: ':robot_face: Delegating to subagent…',
+  };
+  return map[name] || `:gear: Running \`${name}\`…`;
+}
+
+const STATUS_MIN_INTERVAL_MS = 1500;
+
+async function handlePrompt({ prompt, threadTs, say, client, channel }) {
+  const initialText = ':hourglass_flowing_sand: Starting…';
+  const placeholder = await say({ text: initialText, thread_ts: threadTs });
+  const placeholderTs = placeholder?.ts;
+
+  // Throttled progressive update of the placeholder message.
+  let currentStatus = initialText;
+  let pendingStatus = null;
+  let lastUpdateAt = 0;
+  let flushTimer = null;
+
+  const scheduleFlush = () => {
+    if (flushTimer || !placeholderTs) return;
+    const wait = Math.max(0, STATUS_MIN_INTERVAL_MS - (Date.now() - lastUpdateAt));
+    flushTimer = setTimeout(async () => {
+      flushTimer = null;
+      if (!pendingStatus || pendingStatus === currentStatus) return;
+      const target = pendingStatus;
+      pendingStatus = null;
+      try {
+        await client.chat.update({ channel, ts: placeholderTs, text: target });
+        currentStatus = target;
+        lastUpdateAt = Date.now();
+      } catch (e) {
+        if (DEBUG) console.error(`[status] update failed: ${e.message}`);
+      }
+      if (pendingStatus) scheduleFlush();
+    }, wait);
+  };
+
+  const onProgress = (event) => {
+    let next = currentStatus;
+    if (event.kind === 'tool') next = statusForTool(event.name);
+    else if (event.kind === 'writing') next = ':pencil: Writing review…';
+    if (!next || next === currentStatus) return;
+    pendingStatus = next;
+    scheduleFlush();
+  };
 
   try {
     const existing = sessions.get(threadTs);
     console.log(`[claude] channel=${channel} thread=${threadTs} session=${existing || 'new'} prompt="${prompt.slice(0, 100).replace(/\n/g, ' ')}…"`);
 
-    const { output, sessionId } = await runClaude(prompt, existing);
+    const { output, sessionId } = await runClaude(prompt, existing, onProgress);
     console.log(`[claude] done session=${sessionId} bytes=${output.length}`);
 
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     if (sessionId) {
       sessions.set(threadTs, sessionId);
       saveSessions();
     }
 
     const parts = splitMessage(output);
-    for (const part of parts) {
+    // Replace the placeholder with the first chunk, then post the rest as
+    // separate replies so the original message becomes the final answer.
+    if (placeholderTs) {
+      try {
+        await client.chat.update({ channel, ts: placeholderTs, text: parts[0] });
+      } catch (e) {
+        if (DEBUG) console.error(`[final] update failed, falling back to new message: ${e.message}`);
+        await say({ text: parts[0], thread_ts: threadTs });
+      }
+    } else {
+      await say({ text: parts[0], thread_ts: threadTs });
+    }
+    for (const part of parts.slice(1)) {
       await say({ text: part, thread_ts: threadTs });
     }
   } catch (err) {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     console.error(`[error] ${err.message}`);
     const safe = err.message.length > 1500 ? `${err.message.slice(0, 1500)}…` : err.message;
-    await say({ text: `:x: Error running claude:\n\`\`\`${safe}\`\`\``, thread_ts: threadTs });
+    const errText = `:x: Error running claude:\n\`\`\`${safe}\`\`\``;
+    if (placeholderTs) {
+      try { await client.chat.update({ channel, ts: placeholderTs, text: errText }); return; } catch {}
+    }
+    await say({ text: errText, thread_ts: threadTs });
   }
 }
 
-app.event('app_mention', async ({ event, say }) => {
+app.event('app_mention', async ({ event, say, client }) => {
   if (!isAuthorized(event)) {
     console.log(`[skip] unauthorized mention from user=${event.user} channel=${event.channel}`);
     return;
   }
-  const prompt = buildPrompt(event.text || '');
-  if (!prompt) return;
   const threadTs = event.thread_ts || event.ts;
-  await handlePrompt({ prompt, threadTs, say, channel: event.channel });
+  const url = extractPrUrl(event.text || '');
+  if (!url) {
+    await say({
+      text: 'I only review GitHub pull requests. Mention me with a PR URL, e.g.\n`@me https://github.com/org/repo/pull/123`',
+      thread_ts: threadTs,
+    });
+    return;
+  }
+  const skill = DEFAULT_SKILL || 'pr-review';
+  const prompt = `/${skill} ${url}`;
+  await handlePrompt({ prompt, threadTs, say, client, channel: event.channel });
 });
 
-app.event('message', async ({ event, say }) => {
+app.event('message', async ({ event, say, client }) => {
   if (event.bot_id || event.subtype) return;
   if (!event.thread_ts) return;
   if (event.text && /<@[A-Z0-9]+>/.test(event.text)) return; // handled by app_mention
@@ -244,7 +350,7 @@ app.event('message', async ({ event, say }) => {
   if (!text) return;
   // For follow-up messages we never re-prepend the default skill — the session
   // is already inside the skill / conversation context.
-  await handlePrompt({ prompt: text, threadTs, say, channel: event.channel });
+  await handlePrompt({ prompt: text, threadTs, say, client, channel: event.channel });
 });
 
 app.error(async (error) => {
