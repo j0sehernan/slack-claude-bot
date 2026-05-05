@@ -1,7 +1,10 @@
 node_modules/
 .env
+.env.backup.*
+manifest.json
 sessions.json
 bot.log
 logs/
 *.log
 .DS_Store
+.claude/

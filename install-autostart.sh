@@ -8,7 +8,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 REPO_DIR="$(pwd)"
-LABEL="com.user.slack-claude-bot"
+
+# Stable label across reinstalls.  macOS 15+ requires user approval the FIRST
+# time a new label is registered (System Settings → Login Items), so we keep
+# it constant.  Identification at runtime is provided by process.title in
+# index.js, which makes the bot show up as "slack-claude-bot" in ps/pgrep.
+LABEL="com.local.slack-claude-bot"
 
 bold()  { printf "\033[1m%s\033[0m\n" "$1"; }
 ok()    { printf "  ✅  %s\n" "$1"; }
@@ -30,6 +35,16 @@ case "$(uname -s)" in
     PLIST_DIR="$HOME/Library/LaunchAgents"
     PLIST="$PLIST_DIR/$LABEL.plist"
     mkdir -p "$PLIST_DIR"
+
+    # Clean up older labels from previous versions of this script.
+    for legacy_label in com.user.slack-claude-bot "com.$(whoami).slack-claude-bot"; do
+      LEGACY_PLIST="$PLIST_DIR/$legacy_label.plist"
+      if [ -f "$LEGACY_PLIST" ] && [ "$LEGACY_PLIST" != "$PLIST" ]; then
+        launchctl unload "$LEGACY_PLIST" 2>/dev/null || true
+        rm -f "$LEGACY_PLIST"
+        ok "Removed legacy LaunchAgent: $legacy_label.plist"
+      fi
+    done
 
     cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

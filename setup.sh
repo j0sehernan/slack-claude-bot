@@ -112,27 +112,127 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
-# 5. Final instructions
+# 5. Generate personalized Slack manifest (JSON)
+# ---------------------------------------------------------------------------
+bold "5) Generating Slack manifest"
+
+RAW_NAME="$(whoami 2>/dev/null || true)"
+[ -z "$RAW_NAME" ] && RAW_NAME="$(git config user.name 2>/dev/null || true)"
+[ -z "$RAW_NAME" ] && RAW_NAME="user"
+# Strip JSON-breaking chars (quotes, backslashes) and keep only printable
+SAFE_NAME="$(printf '%s' "$RAW_NAME" | tr -d '"\\' | tr -cd '[:print:]')"
+# Slug for the @mention handle: lowercase, alnum+dashes, collapse, trim
+SLUG="$(printf '%s' "$SAFE_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+[ -z "$SLUG" ] && SLUG="user"
+
+APP_NAME="$SLUG-pr-review-bot"
+BOT_HANDLE="$SLUG-pr-review-bot"
+
+FORCE_MANIFEST=0
+NO_AUTOSTART=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE_MANIFEST=1 ;;
+    --no-autostart) NO_AUTOSTART=1 ;;
+  esac
+done
+
+if [ -f manifest.json ] && [ "$FORCE_MANIFEST" != "1" ]; then
+  ok "manifest.json already exists — not overwriting"
+  info "Re-run with './setup.sh --force' (or delete manifest.json) to regenerate."
+else
+  cat > manifest.json <<EOF
+{
+  "display_information": {
+    "name": "$APP_NAME",
+    "description": "Code review and Claude Code assistant via Slack",
+    "background_color": "#1a1a1a",
+    "long_description": "Bot that listens for mentions in Slack and delegates to the Claude Code instance running on your local machine. Designed for code reviews, debugging, and technical questions that benefit from access to your local repo, gh CLI, and configured skills."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "$BOT_HANDLE",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "chat:write.public",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "im:read",
+        "im:write",
+        "mpim:history",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}
+EOF
+  ok "manifest.json generated  →  app: \"$APP_NAME\"  |  mention: @$BOT_HANDLE"
+fi
+echo
+
+# ---------------------------------------------------------------------------
+# 6. Final instructions
 # ---------------------------------------------------------------------------
 bold "🎉 Setup complete"
 echo
 if [ "${NEEDS_TOKENS:-0}" = "1" ]; then
   echo "📝  Slack credentials still need to be configured:"
   echo "   1. Open https://api.slack.com/apps → 'Create New App' → 'From a manifest'"
-  echo "   2. Pick your workspace, switch to the YAML tab and paste the FULL content of:"
-  echo "      $REPO_DIR/manifest.yaml"
-  echo "   3. Click 'Create' and then in the newly created app:"
+  echo "   2. Pick your workspace. The dialog opens on the JSON tab (default) — paste"
+  echo "      the FULL content of:"
+  echo "         $REPO_DIR/manifest.json"
+  echo "   3. Click 'Next' → 'Create'. Then in the newly created app:"
   echo "      • OAuth & Permissions → 'Install to Workspace' → copy the Bot Token (xoxb-…)"
   echo "      • Basic Information → App-Level Tokens → 'Generate Token and Scopes'"
   echo "        scope: connections:write → copy the token (xapp-…)"
   echo "   4. Edit $REPO_DIR/.env and paste both tokens"
-  echo "   5. In Slack, invite the bot to a channel:  /invite @claude-code"
+  echo "   5. In Slack, invite the bot to a channel:  /invite @$BOT_HANDLE"
   echo
   if command -v open >/dev/null 2>&1; then
     echo "   💡 Tip: run  open https://api.slack.com/apps   to jump straight to the page."
     echo
   fi
 fi
-echo "▶️   Start the bot:                       npm start"
-echo "🔁  Start and keep listening forever:    ./install-autostart.sh"
+echo "▶️   Start the bot manually:             npm start"
+echo "📜  Tail logs:                            npm run logs"
+echo "🔁  Install/refresh autostart service:   ./install-autostart.sh"
 echo
+
+# ---------------------------------------------------------------------------
+# 7. Auto-install autostart if tokens are valid (opt-out with --no-autostart)
+# ---------------------------------------------------------------------------
+if [ "${NEEDS_TOKENS:-0}" = "0" ] && [ "$NO_AUTOSTART" != "1" ]; then
+  bold "7) Tokens detected — installing autostart service"
+  ./install-autostart.sh
+  echo
+  info "To run manually instead, re-run with: ./setup.sh --no-autostart"
+fi

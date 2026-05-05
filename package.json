@@ -10,7 +10,8 @@
     "setup": "./setup.sh",
     "start": "node index.js",
     "dev": "node --watch index.js",
-    "autostart": "./install-autostart.sh"
+    "autostart": "./install-autostart.sh",
+    "logs": "tail -f logs/bot.log"
   },
   "keywords": [
     "slack",

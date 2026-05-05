@@ -1,3 +1,7 @@
+// Identify this process so `ps`, `pgrep`, Activity Monitor, etc. don't just
+// show a generic "node" entry.  Set before any other init.
+process.title = 'slack-claude-bot';
+
 require('dotenv').config();
 
 const { App } = require('@slack/bolt');
