@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Wrapper that gives the bot a recognizable name in macOS Login Items,
+# Activity Monitor, ps, and pgrep — instead of a generic "node".
+#
+# `exec -a slack-claude-bot` sets argv[0] for the new process, so even
+# after exec'ing into node the process name stays "slack-claude-bot".
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+exec -a slack-claude-bot node "$ROOT/index.js" "$@"

@@ -25,6 +25,13 @@ NODE_BIN="$(command -v node || true)"
 [ -f "$REPO_DIR/.env" ] || fail "Missing .env — run ./setup.sh first"
 [ -d "$REPO_DIR/node_modules" ] || fail "Missing node_modules — run ./setup.sh first"
 
+# Wrapper script that exec's node — the LaunchAgent registers this path so
+# macOS Login Items, Activity Monitor and `ps` show "slack-claude-bot"
+# instead of a generic "node" entry.
+WRAPPER="$REPO_DIR/bin/slack-claude-bot"
+[ -f "$WRAPPER" ] || fail "Missing $WRAPPER — pull the latest changes"
+chmod +x "$WRAPPER"
+
 mkdir -p "$REPO_DIR/logs"
 LOG_FILE="$REPO_DIR/logs/bot.log"
 ERR_FILE="$REPO_DIR/logs/bot.err"
@@ -55,8 +62,7 @@ case "$(uname -s)" in
   <string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$NODE_BIN</string>
-    <string>$REPO_DIR/index.js</string>
+    <string>$WRAPPER</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$REPO_DIR</string>
@@ -104,7 +110,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO_DIR
-ExecStart=$NODE_BIN $REPO_DIR/index.js
+ExecStart=$WRAPPER
 Restart=always
 RestartSec=5
 StandardOutput=append:$LOG_FILE
